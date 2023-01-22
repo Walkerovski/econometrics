@@ -5,18 +5,28 @@ library(tseries)
 library(car)
 library(readxl)
 library(dplyr)
+library(stargazer) 
+library(systemfit)
+library(AER)
+install.packages('prais')
+install.packages('orcutt')
+library(prais)
+library(orcutt)
 
-gen_pacf <- function(data, name) {
+gen_plot <- function(data, x, name, type) {
     png(file=name,
     width=600, height=350)
-    pacf(data)
-    dev.off()
-}
-
-gen_plot <- function(x, name) {
-    png(file=name,
-    width=600, height=350)
-    plot(data$date, x, type='l')
+    if(type == "hist")
+        hist(data, breaks=50, col="green", xlab="reszty", ylab="czestotliwosc")
+    else if(type == "scatter")
+        if(x)
+            plot(data, x, lwd=2, col='red')
+        else
+            plot(data, lwd=2, col='red')
+    else if(type == "pacf")
+        pacf(data)
+    else
+        plot(data, x, type)
     dev.off()
 }
 
@@ -37,11 +47,11 @@ crisis <- data$crisis[14:130]
 
 boom <- data$boom[14:130]
 
-gen_pacf(d_l_oil, "./images/pacf_d_l_oil.png")
-gen_pacf(d_l_aluminium, "./images/pacf_d_l_aluminium.png")
-gen_pacf(d_l_steel, "./images/pacf_d_l_steel.png")
-gen_pacf(d_sales, "./images/pacf_d_sales.png")
-gen_pacf(d_interest, "./images/pacf_d_interest.png")
+gen_plot(d_l_oil, NA, "./images/pacf_d_l_oil.png", "pacf")
+gen_plot(d_l_aluminium, NA, "./images/pacf_d_l_aluminium.png", "pacf")
+gen_plot(d_l_steel, NA, "./images/pacf_d_l_steel.png", "pacf")
+gen_plot(d_sales, NA, "./images/pacf_d_sales.png", "pacf")
+gen_plot(d_interest, NA, "./images/pacf_d_interest.png", "pacf")
 
 print(adf.test(d_l_oil))
 print(adf.test(d_l_aluminium))
@@ -63,13 +73,71 @@ model <- lm(d_sales~d_l_oil_13 + d_l_steel + crisis +
                d_sales_12 + d_interest_1, data=df)
 print(summary(model))
 
-#wykres sprzedazy
-gen_plot(data$sales, "./images/plot_sales.png")
+# wykres sprzedazy
+gen_plot(data$date, data$sales, "./images/plot_sales.png", "l")
 
-#wykres reszt
-ehat=model$residuals
-png(file="./images/hist.png",
-    width=600, height=350)
-    hist(ehat,breaks=50,col="green",xlab="reszty",ylab="czestotliwosc")
-    dev.off()
-vif(model)
+## kryteria informacyjne
+cat("AIC: ", AIC(model), "\n")
+cat("BIC: ", BIC(model), "\n")
+cat("VIF: ",vif(model), "\n")
+
+## Normalność składnika losowego - test Jaque - Berry + histogram
+ehat <- model$residuals
+gen_plot(ehat, NA, "./images/hist.png", "hist")
+print(jarque.bera.test(ehat))
+
+
+### Niesferyczność - autokorelacja, heteroskedastyczność
+
+## Autokorelacja - analiza wykresów reszt w czasie, scatterplotów i testów
+
+# homoskedastyczność White test
+print(bptest(model, data = df))
+
+#Cochrane-Orcutt
+CO <- cochrane.orcutt(model)
+print(summary(CO))
+
+ehat_CO <- CO$residuals
+gen_plot(ehat_CO, FALSE, "./images/scatterplot_co.png", "scatter")
+gen_plot(lag(ehat_CO,1), ehat_CO, "./images/scatterplot_co_delayed.png", "scatter")
+
+print(Box.test(ehat_CO,lag=1,type="Box-Pierce"))
+print(Box.test(ehat_CO,lag=1,type="Ljung-Box"))
+print(Box.test(ehat_CO,lag=4,type="Box-Pierce"))
+print(Box.test(ehat_CO,lag=4,type="Ljung-Box"))
+
+print(bgtest(CO))
+print(bgtest(CO, order=10))
+
+#odporne błędy standardowe
+
+print(HAC_NW <- NeweyWest(model, lag=4))
+
+print(coeftest(model))
+print(coeftest(model,vcov=HAC_NW))
+
+
+# #Prais Winsten
+# pw <- prais_winsten(d_sales~d_l_oil_13 + d_l_steel + crisis + 
+#                d_sales_12 + d_interest_1, data=df, index="date")
+# malfunction due to undefined columns selected (df)
+
+### MZI
+# pierwszy krok 
+fst=lm(d_l_steel~ d_l_oil + crisis + d_l_oil_13 +
+               d_sales_12 + d_interest_1, data=df)
+print(summary(fst))
+# Test na moc instrumentow
+print(linearHypothesis(fst,"d_l_oil=0"))
+
+# Zapisanie wartosci teoretycznych z pierwszego kroku 
+fst_fitted <- rep(NA, times = 117)
+fst_fitted[13:117] = fst$fitted
+df2 <- df %>%
+    dplyr::mutate(d_l_steel = fst_fitted)
+## drugi krok 
+tsls=lm(d_sales~d_l_oil_13 + d_l_steel + crisis + 
+               d_sales_12 + d_interest_1, data=df2)
+
+stargazer(model,fst,tsls,type="text")
